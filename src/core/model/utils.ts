@@ -105,27 +105,32 @@ function addFlops(out: FlopsByWidth, d: Dtype, flops: number): void {
 
 // Matmul FLOPs one token touches, bucketed by each category's activation
 // width. Sums to 2 x activeParams when a model runs one width throughout.
-function matmulFlopsByWidth(m: ModelSpec): FlopsByWidth {
+// `share` is the fraction of tokens each block sees (prefill tails).
+function matmulFlopsByWidth(m: ModelSpec, share: (b: BlockSpec) => number = () => 1): FlopsByWidth {
   const a = m.precision.activations;
   const out: FlopsByWidth = new Map();
   const add = (d: Dtype, params: number) => addFlops(out, d, 2 * params);
+  const sum = (f: (b: BlockSpec) => number) => sumBlocks(m, (b) => share(b) * f(b));
 
-  add(a.attention, totalAttnParams(m));
+  add(
+    a.attention,
+    sum((b) => blockAttnParams(m, b).total + blockEngramParams(b)),
+  );
   add(
     a.denseMlp,
-    sumBlocks(m, (b) => blockDenseMlpParams(m, b) + blockLatentProjParams(m, b)),
+    sum((b) => blockDenseMlpParams(m, b) + blockLatentProjParams(m, b)),
   );
   add(
     a.sharedExperts,
-    sumBlocks(m, (b) => blockSharedExpertParams(m, b)),
+    sum((b) => blockSharedExpertParams(m, b)),
   );
   add(
     a.router,
-    sumBlocks(m, (b) => blockRouterParams(m, b)),
+    sum((b) => blockRouterParams(m, b)),
   );
   add(
     a.routedExperts,
-    sumBlocks(m, (b) => blockRoutedExpertParams(m, b).active),
+    sum((b) => blockRoutedExpertParams(m, b).active),
   );
   add(a.embeddings, m.vocab * m.modelDim);
   return out;
@@ -143,11 +148,21 @@ export function flopsPerDecodeToken(m: ModelSpec, ctx: number): FlopsByWidth {
 }
 
 // Average per-token FLOPs to prefill a sequence of length T (matmuls + attention).
+// A block with a prefill tail runs only each prompt's last tokens, which
+// still attend over everything before them.
 export function flopsPerPrefillToken(m: ModelSpec, T: number): FlopsByWidth {
-  const out = matmulFlopsByWidth(m);
+  const start = (b: BlockSpec) =>
+    b.prefillTail === undefined ? 0 : Math.max(0, T - b.prefillTail);
+  const out = matmulFlopsByWidth(m, (b) => (T - start(b)) / T);
   const attn = m.precision.activations.attention;
-  const core = sumBlocks(m, (b) => blockAttnFlopsPrefillParts(b, T).core) / T;
-  const indexer = sumBlocks(m, (b) => blockAttnFlopsPrefillParts(b, T).indexer) / T;
+  const parts = (b: BlockSpec) => {
+    const full = blockAttnFlopsPrefillParts(b, T);
+    if (start(b) === 0) return full;
+    const skipped = blockAttnFlopsPrefillParts(b, start(b));
+    return { core: full.core - skipped.core, indexer: full.indexer - skipped.indexer };
+  };
+  const core = sumBlocks(m, (b) => parts(b).core) / T;
+  const indexer = sumBlocks(m, (b) => parts(b).indexer) / T;
   addFlops(out, attn, core);
   addFlops(out, m.precision.indexer ?? attn, indexer);
   return out;

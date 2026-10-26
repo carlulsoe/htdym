@@ -149,6 +149,7 @@ export function evaluateServingStep<TBackend extends CostBackend>(
         ctx,
         chunk: promptSeqs > 0 ? { seqs: promptSeqs, ctx: P, cached } : undefined,
         includeBoundary: pp > 1 && stage.index < stages.length - 1,
+        routingSkew: workload.routingSkew,
       },
       stage,
     );
@@ -165,6 +166,7 @@ export function evaluateServingStep<TBackend extends CostBackend>(
         seqsPerGroup,
         ctx,
         includeBoundary: false,
+        routingSkew: workload.routingSkew,
       },
       draftStage,
     ).map((s) => ({ ...s, label: `draft:${s.label}`, repeat: s.repeat * draft!.passes }));

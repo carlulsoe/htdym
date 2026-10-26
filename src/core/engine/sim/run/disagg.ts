@@ -13,6 +13,7 @@ import type {
   SimInput,
 } from '../../surface/api';
 import { evaluateDecodeAtBatch } from './decode';
+import { evaluateServingStep, type ServingEvaluation, type ServingOptions } from './serving';
 import { evaluatePrefill } from './prefill';
 import { memoryFootprint } from './memory';
 
@@ -50,6 +51,9 @@ export interface DisaggInput {
   // their KV too (KV-aware routing sends a request to a decode worker that
   // shares its prefix), so they need no transfer either. Default 0.
   prefixHitRate?: number;
+  // Speculative decoding on the decode pool (the prefill pool only fills
+  // the cache). Absent = plain decode.
+  speculative?: ServingOptions['speculative'];
 }
 
 // One pool's side of the balance, all rates per chip of that pool.
@@ -76,7 +80,7 @@ export type DisaggEvaluation<TBackend extends CostBackend> =
   | {
       ok: true;
       prefill: DisaggPool<Ok<PrefillEvaluation<TBackend>>>;
-      decode: DisaggPool<Ok<DecodeEvaluation<TBackend>>>;
+      decode: DisaggPool<Ok<DecodeEvaluation<TBackend>> | Ok<ServingEvaluation<TBackend>>>;
       link: KvLink;
       // KV one request moves, unsharded (the uncached prompt tail at P)
       kvBytesPerRequest: number;
@@ -150,13 +154,18 @@ export function evaluateDisagg<TBackend extends CostBackend>(
   );
   if (!pre.ok) return pre;
 
-  const dec = evaluateDecodeAtBatch(
-    { model, deployment: input.decode, workload },
-    input.decodeBatch,
-    roleSize(input.decode.mesh, 'PP'),
-    opts,
-  );
+  const decodeInput = { model, deployment: input.decode, workload };
+  const dec = input.speculative
+    ? evaluateServingStep(decodeInput, input.decodeBatch, { speculative: input.speculative }, opts)
+    : evaluateDecodeAtBatch(
+        decodeInput,
+        input.decodeBatch,
+        roleSize(input.decode.mesh, 'PP'),
+        opts,
+      );
   if (!dec.ok) return dec;
+  const decodeTokPerSecPerChip =
+    'outputTokPerSecPerChip' in dec ? dec.outputTokPerSecPerChip : dec.tokPerSecPerChip;
 
   // Only the uncached tail moves. Measuring it as the KV of a tail-length
   // sequence keeps windowed caches honest: a window full of new tokens
@@ -168,7 +177,7 @@ export function evaluateDisagg<TBackend extends CostBackend>(
   const transferTime = link.latency + Math.max(srcBytes, dstBytes) / link.bandwidthPerChip;
 
   const pCompute = pre.tokPerSecPerChip / (P * (1 - h));
-  const dCompute = dec.tokPerSecPerChip / G;
+  const dCompute = decodeTokPerSecPerChip / G;
   const pLink = linkRate(input.prefill, srcBytes, link);
   const dLink = linkRate(input.decode, dstBytes, link);
   const pRate = Math.min(pCompute, pLink);

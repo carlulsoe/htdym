@@ -154,10 +154,10 @@ const v41Moe = moeMlp({ experts: 384, topK: 6, expertDim: 2304, sharedExperts: 1
 // pinned host memory, projected 6144 -> 5 x 5120 (a key per residual
 // stream and one shared value).
 const v41Engram = { lookups: 24, rowBytes: 264, projIn: 24 * 256, projOut: 5 * 5120 };
-// From layer 20 on, nothing a later token reads lives outside the window
-// (layer 20's compressed cache is written from its input), so prefill runs
-// those layers on each prompt's last 128 tokens only. Layer 20's own
-// compressor still sees every token; that projection is left unpriced.
+// Past layer 20 nothing a later token reads lives outside the window (the
+// compressed cache they read is layer 20's, written from its input), so
+// prefill runs layers 21-39 on each prompt's last 128 tokens only. vLLM
+// also trims layer 20 to its compressor; here it runs whole.
 const v41Tail = 128;
 const one = (block: BlockSpec, count = 1): BlockGroup => ({
   pattern: [{ block, count }],
@@ -284,7 +284,7 @@ export const MODEL_PRESETS: ModelSpec[] = [
       one({ attn: v41Pair, mlp: v41Moe }, 5),
       one({ attn: v41PairSource, mlp: v41Moe, engram: v41Engram }),
       one({ attn: v41Pair, mlp: v41Moe }, 5),
-      one({ attn: v41FullSource, mlp: v41Moe, prefillTail: v41Tail }),
+      one({ attn: v41FullSource, mlp: v41Moe }),
       {
         pattern: [
           { block: { attn: v41Full, mlp: v41Moe, prefillTail: v41Tail }, count: 3 },

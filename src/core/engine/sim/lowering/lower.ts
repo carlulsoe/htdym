@@ -82,18 +82,16 @@ export function lowerStage(args: LowerArgs, stage: Stage): Segment<LoweredOp>[] 
         const none = { core: 0, indexer: 0 };
         const full = blockAttnFlopsPrefillParts(block, P);
         const hit = lo > 0 ? blockAttnFlopsPrefillParts(block, lo) : none;
-        const fullKv = blockKvBytesParts(block, kvB, P, 'store');
-        const hitKv = lo > 0 ? blockKvBytesParts(block, kvB, lo, 'store') : none;
+        // the cache gains exactly what a (P - lo)-token sequence stores:
+        // its compressed entries and as much window as it fills
+        const written = blockKvBytesParts(block, kvB, P - lo, 'store');
         return {
           rows: seqs * (P - lo),
           flops: {
             core: seqs * (full.core - hit.core),
             indexer: seqs * (full.indexer - hit.indexer),
           },
-          write: {
-            core: seqs * (fullKv.core - hitKv.core),
-            indexer: seqs * (fullKv.indexer - hitKv.indexer),
-          },
+          write: { core: seqs * written.core, indexer: seqs * written.indexer },
         };
       };
       let rowsPerGroup: number;
@@ -260,6 +258,10 @@ export function lowerStage(args: LowerArgs, stage: Stage): Segment<LoweredOp>[] 
 
       residual = trace.expect(residual, residualT); // [B_dpa, D]
     }
+
+  // the stage hands on (and unembeds) every row it was given
+  if (residual.type.shape[0] !== tokensTotal)
+    residual = trace.reshape(residual, [tokensTotal, d_model]);
 
   if (stage.hasUnembedding) {
     trace.startSegment('lm_head');
