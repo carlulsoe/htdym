@@ -172,16 +172,13 @@ export function evaluateDisagg<TBackend extends CostBackend>(
   // moves whole, however long the cached prefix behind it.
   const tail = P - cached;
   const kvBytesPerRequest = kvBytesPerSeq(model, DTYPE_BYTES[model.precision.kv], tail);
-  // A source chip sends what its share of the destination group holds:
-  // where the decode layout replicates KV heads the prefill pool sends
-  // each copy, so the sent bytes are the larger of its own shard and its
-  // share of every receiver's.
+  // The destination group needs what its chips hold, replicated heads
+  // included, and the source group's chips split sending it: copies the
+  // source holds redundantly go out once, copies the destination needs
+  // twice go out twice.
   const groupChips = (d: Deployment) => totalChips(d) / roleSize(d.mesh, 'DPA');
   const dstBytes = kvBytesPerChip(model, input.decode, tail);
-  const srcBytes = Math.max(
-    kvBytesPerChip(model, input.prefill, tail),
-    (dstBytes * groupChips(input.decode)) / groupChips(input.prefill),
-  );
+  const srcBytes = (dstBytes * groupChips(input.decode)) / groupChips(input.prefill);
   const transferTime = link.latency + Math.max(srcBytes, dstBytes) / link.bandwidthPerChip;
 
   const pCompute = pre.tokPerSecPerChip / P;

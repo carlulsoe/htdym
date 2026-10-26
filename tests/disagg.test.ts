@@ -126,4 +126,7 @@ test('a decode layout that replicates KV heads makes the source send each copy',
   const e = run({ model: narrow, decode: pool(4, { TP: 4, DPA: 1 }) });
   expect(e.decode.transferBytesPerChip).toBeCloseTo(e.kvBytesPerRequest / 2);
   expect(e.prefill.transferBytesPerChip).toBeCloseTo(2 * e.kvBytesPerRequest);
+  // and a source that replicates splits one copy among its chips
+  const back = run({ model: narrow, prefill: pool(4, { TP: 4, DPA: 1 }) });
+  expect(back.prefill.transferBytesPerChip).toBeCloseTo(back.kvBytesPerRequest / 4);
 });
