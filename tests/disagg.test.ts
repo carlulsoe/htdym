@@ -110,3 +110,20 @@ test('the pool ratio balances the two rates', () => {
   expect(n.usdPerRequest).toBeCloseTo((best * h100.costPerHour!) / 3600);
   expect(n.reqPerSec).toBeCloseTo(Math.min(n.prefillNodes * p, n.decodeNodes * d));
 });
+
+test('a decode layout that replicates KV heads makes the source send each copy', () => {
+  // two KV heads over TP4: every head is held twice on the decode side
+  const narrow = {
+    ...llama8,
+    blocks: llama8.blocks.map((g) => ({
+      ...g,
+      pattern: g.pattern.map((r) => ({
+        ...r,
+        block: { ...r.block, attn: { ...r.block.attn, kvHeads: 2 } },
+      })),
+    })),
+  } as typeof llama8;
+  const e = run({ model: narrow, decode: pool(4, { TP: 4, DPA: 1 }) });
+  expect(e.decode.transferBytesPerChip).toBeCloseTo(e.kvBytesPerRequest / 2);
+  expect(e.prefill.transferBytesPerChip).toBeCloseTo(2 * e.kvBytesPerRequest);
+});

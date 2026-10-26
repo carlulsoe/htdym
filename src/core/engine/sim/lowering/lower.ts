@@ -269,9 +269,13 @@ export function lowerStage(args: LowerArgs, stage: Stage): Segment<LoweredOp>[] 
       residual = trace.expect(residual, residualT); // [B_dpa, D]
     }
 
-  // the stage hands on (and unembeds) every row it was given
-  if (residual.type.shape[0] !== tokensTotal)
-    residual = trace.reshape(residual, [tokensTotal, d_model]);
+  // the stage hands on (and unembeds) every row it computes: all of them,
+  // less a prefill's prefix-cache hits
+  const outRows =
+    args.phase === 'prefill' && args.cached
+      ? (tokensTotal * (args.ctx - args.cached)) / args.ctx
+      : tokensTotal;
+  if (residual.type.shape[0] !== outRows) residual = trace.reshape(residual, [outRows, d_model]);
 
   if (stage.hasUnembedding) {
     trace.startSegment('lm_head');
