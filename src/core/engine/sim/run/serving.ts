@@ -5,7 +5,7 @@ import { lowerStage } from '../lowering/lower';
 import { partitionIntoStages, type Stage } from '../lowering/stages';
 import type { EvalFailure, EvalOptions, MemoryFootprint, SimInput } from '../../surface/api';
 import type { DraftSpec, ModelSpec } from '../../../model/models';
-import type { Segment } from '../ir/ops';
+import type { OpId, Segment } from '../ir/ops';
 import { memoryFootprint } from './memory';
 import { runnableOn, validateInput } from './validate';
 import { runPipeline } from './common';
@@ -83,6 +83,19 @@ export function evaluateServingStep<TBackend extends CostBackend>(
   const draft = serving.speculative ? model.draft : undefined;
   const dpa = roleSize(deployment.mesh, 'DPA');
   const pp = roleSize(deployment.mesh, 'PP');
+  // Speculation is only credited with the draft that produces it: the
+  // model must carry one, proposing exactly the tokens the verify scores.
+  if (serving.speculative) {
+    const proposed = draft ? draft.passes * draft.tokensPerPass : 0;
+    if (proposed !== serving.speculative.draftTokens)
+      return fail({
+        severity: 'error',
+        code: 'spec-draft-mismatch',
+        message: draft
+          ? `the draft proposes ${proposed} tokens per step, not ${serving.speculative.draftTokens}`
+          : `${input.model.name} has no draft model to speculate with`,
+      });
+  }
   if (pp > 1 && serving.speculative)
     return fail({
       severity: 'error',
@@ -169,7 +182,17 @@ export function evaluateServingStep<TBackend extends CostBackend>(
         routingSkew: workload.routingSkew,
       },
       draftStage,
-    ).map((s) => ({ ...s, label: `draft:${s.label}`, repeat: s.repeat * draft!.passes }));
+    ).map((s) => ({
+      ...s,
+      label: `draft:${s.label}`,
+      repeat: s.repeat * draft!.passes,
+      // a fresh builder numbers from zero again: keep its ids apart
+      ops: s.ops.map((op) => ({
+        ...op,
+        id: `draft:${op.id}` as OpId,
+        deps: op.deps.map((d) => `draft:${d}` as OpId),
+      })),
+    }));
     return [...target, ...drafted];
   });
 

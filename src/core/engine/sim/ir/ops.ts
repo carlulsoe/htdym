@@ -107,14 +107,7 @@ export interface Segment<Op = ExpandedOp> {
 
 // What lowering emits, reshards still abstract.
 export type LoweredOp =
-  | GemmOp
-  | AttentionOp
-  | WeightLoadOp
-  | HostReadOp
-  | JoinOp
-  | ReshardOp
-  | CollectiveOp
-  | P2pOp;
+  GemmOp | AttentionOp | WeightLoadOp | HostReadOp | JoinOp | ReshardOp | CollectiveOp | P2pOp;
 
 // What reshard expansion emits and cost backends consume.
 export type ExpandedOp = Exclude<LoweredOp, ReshardOp>;

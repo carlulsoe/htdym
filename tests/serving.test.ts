@@ -60,9 +60,9 @@ test('a layer sharing a cache stores only its window but reads the shared entrie
 });
 
 test('a speculative verify reads each cache once however many queries it scores', () => {
-  const plain = evaluateDecodeAtBatch(input(v4), 256, 1, opts);
+  const plain = evaluateServingStep(input(v41), 256, {}, opts);
   const verify = evaluateServingStep(
-    input(v4),
+    input(v41),
     256,
     { speculative: { draftTokens: 5, acceptance: 0 } },
     opts,
@@ -71,16 +71,46 @@ test('a speculative verify reads each cache once however many queries it scores'
   const kv = (trace: typeof plain.perStageTrace) =>
     trace
       .flat()
-      .flatMap((s) =>
-        s.ops
-          .filter((o) => o.kind === 'attention')
-          .map((o) => s.repeat * (o.kind === 'attention' ? o.kvReadBytes : 0)),
-      )
+      .filter((s) => !s.label.startsWith('draft:'))
+      .flatMap((s) => s.ops.map((o) => (o.kind === 'attention' ? s.repeat * o.kvReadBytes : 0)))
       .reduce((a, b) => a + b, 0);
   expect(kv(verify.perStageTrace)).toBeCloseTo(kv(plain.perStageTrace));
   // six queries cost more than one, but far less than six steps
-  expect(verify.stepTime).toBeGreaterThan(plain.stepTime);
+  expect(verify.targetTime).toBeGreaterThan(plain.stepTime);
   expect(verify.stepTime).toBeLessThan(6 * plain.stepTime);
+  // the draft's ops keep ids of their own beside the target's
+  const ids = verify.perStageTrace.flat().flatMap((s) => s.ops.map((o) => o.id));
+  expect(new Set(ids).size).toBe(ids.length);
+});
+
+test('speculation needs a draft proposing the tokens it verifies', () => {
+  const none = evaluateServingStep(
+    input(v4),
+    256,
+    { speculative: { draftTokens: 5, acceptance: 0.8 } },
+    opts,
+  );
+  expect(none.ok).toBe(false);
+  const wrong = evaluateServingStep(
+    input(v41),
+    256,
+    { speculative: { draftTokens: 3, acceptance: 0.8 } },
+    opts,
+  );
+  expect(wrong.ok).toBe(false);
+});
+
+test('a cached prefix is read by the prompt that extends it', () => {
+  const at = (cached: number) => {
+    const r = evaluatePrefill(input(v4, 8192, 1), 8, 'throughput', opts, cached);
+    if (!r.ok) throw new Error('infeasible');
+    return r.perStageTrace
+      .flat()
+      .flatMap((s) => s.ops.map((o) => (o.kind === 'attention' ? s.repeat * o.kvReadBytes : 0)))
+      .reduce((a, b) => a + b, 0);
+  };
+  expect(at(0)).toBe(0);
+  expect(at(4096)).toBeGreaterThan(0);
 });
 
 test('higher acceptance buys tokens at the same step time', () => {

@@ -86,7 +86,8 @@ export type DiagnosticCode =
   | 'weights-dont-fit'
   | 'kv-no-room'
   | 'token-budget'
-  | 'spec-with-pp';
+  | 'spec-with-pp'
+  | 'spec-draft-mismatch';
 
 export interface Diagnostic {
   severity: 'error' | 'warning' | 'info';

@@ -71,12 +71,14 @@ test('decode layout sets bytes per destination chip and the link rate', () => {
 test('prefix hits cut prefill load and transfer', () => {
   const cold = run();
   const warm = run({ prefixHitRate: 0.5 });
-  expect(warm.prefill.computeReqPerSecPerChip).toBeCloseTo(
-    2 * cold.prefill.computeReqPerSecPerChip,
-  );
+  // half the prompt is computed, but it attends over (and reads) the whole
+  // prefix, so the rate gains less than the 2x half the tokens suggests
+  const gain = warm.prefill.computeReqPerSecPerChip / cold.prefill.computeReqPerSecPerChip;
+  expect(gain).toBeGreaterThan(1.2);
+  expect(gain).toBeLessThan(2);
   expect(warm.kvBytesPerRequest).toBeCloseTo(cold.kvBytesPerRequest / 2);
   expect(warm.decode.computeReqPerSecPerChip).toBe(cold.decode.computeReqPerSecPerChip);
-  expect(warm.decodeChipsPerPrefillChip).toBeCloseTo(2 * cold.decodeChipsPerPrefillChip);
+  expect(warm.decodeChipsPerPrefillChip).toBeCloseTo(gain * cold.decodeChipsPerPrefillChip);
 });
 
 test('a slow link, not compute, bounds the rate', () => {

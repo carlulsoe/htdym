@@ -33,6 +33,8 @@ export interface LowerArgs {
   // hits and cost nothing. Its tokens are already counted in
   // tokensTotal / tokensPerGroup; this adds only their attention.
   chunk?: { seqs: number; ctx: number; cached: number };
+  // prefill: the first `cached` tokens of each prompt are prefix-cache hits
+  cached?: number;
   // emit the stage-boundary send (PP > 1 and not the last stage)
   includeBoundary: boolean;
   // MoE hottest/mean EP-rank load at large batch (SimInput's workload)
@@ -85,6 +87,10 @@ export function lowerStage(args: LowerArgs, stage: Stage): Segment<LoweredOp>[] 
         // the cache gains exactly what a (P - lo)-token sequence stores:
         // its compressed entries and as much window as it fills
         const written = blockKvBytesParts(block, kvB, P - lo, 'store');
+        // The uncached queries attend over the hit prefix, which comes from
+        // HBM: read once per prompt, as a decode step reads a sequence's
+        // cache once for all its queries (sparse picks taken as one set).
+        const prefix = cached > 0 ? blockKvBytesParts(block, kvB, cached, 'read') : none;
         return {
           rows: seqs * (P - lo),
           flops: {
@@ -92,6 +98,7 @@ export function lowerStage(args: LowerArgs, stage: Stage): Segment<LoweredOp>[] 
             indexer: seqs * (full.indexer - hit.indexer),
           },
           write: { core: seqs * written.core, indexer: seqs * written.indexer },
+          read: { core: seqs * prefix.core, indexer: seqs * prefix.indexer },
         };
       };
       let rowsPerGroup: number;
@@ -101,9 +108,9 @@ export function lowerStage(args: LowerArgs, stage: Stage): Segment<LoweredOp>[] 
       if (args.phase === 'prefill') {
         // TTFT runs one prompt on one group, so rows are prompt tokens
         // times however many prompts the group holds
-        const w = prompt(seqsPerGroup, args.ctx, 0);
+        const w = prompt(seqsPerGroup, args.ctx, args.cached ?? 0);
         rowsPerGroup = (tokensPerGroup * w.rows) / (seqsPerGroup * args.ctx);
-        [flops, kvWrite] = [w.flops, w.write];
+        [flops, kvWrite, kvRead] = [w.flops, w.write, w.read];
       } else {
         const chunk = args.chunk
           ? prompt(args.chunk.seqs, args.chunk.ctx, args.chunk.cached)
@@ -118,7 +125,10 @@ export function lowerStage(args: LowerArgs, stage: Stage): Segment<LoweredOp>[] 
           core: decodeTokens * per.core + (chunk?.flops.core ?? 0),
           indexer: decodeTokens * per.indexer + (chunk?.flops.indexer ?? 0),
         };
-        kvRead = { core: seqsPerGroup * read.core, indexer: seqsPerGroup * read.indexer };
+        kvRead = {
+          core: seqsPerGroup * read.core + (chunk?.read.core ?? 0),
+          indexer: seqsPerGroup * read.indexer + (chunk?.read.indexer ?? 0),
+        };
         kvWrite = {
           core: decodeTokens * write.core + (chunk?.write.core ?? 0),
           indexer: decodeTokens * write.indexer + (chunk?.write.indexer ?? 0),

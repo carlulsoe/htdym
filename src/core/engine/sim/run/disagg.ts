@@ -139,18 +139,18 @@ export function evaluateDisagg<TBackend extends CostBackend>(
   if (!(h >= 0 && h < 1)) throw new Error(`prefix hit rate must be in [0, 1)`);
   const link = input.link ?? defaultKvLink(input.prefill, input.decode);
 
-  // Prefill is priced at the full prompt and its per-token rate charged
-  // only to the uncached tail. The tail attends over the whole prefix, so
-  // its tokens cost at least the full-length average: this is optimistic
-  // in attention, exact in the matmuls.
+  // Prefill computes only each prompt's uncached tail, which attends over
+  // the cached prefix (read from HBM). The token budget fills with tails.
+  const cached = Math.round(P * h);
   const pDpa = roleSize(input.prefill.mesh, 'DPA');
   const pPp = roleSize(input.prefill.mesh, 'PP');
-  const seqs = input.prefillSeqs ?? pDpa * pPp * Math.max(1, Math.floor(8192 / P));
+  const seqs = input.prefillSeqs ?? pDpa * pPp * Math.max(1, Math.floor(8192 / (P - cached)));
   const pre = evaluatePrefill(
     { model, deployment: input.prefill, workload },
     seqs,
     'throughput',
     opts,
+    cached,
   );
   if (!pre.ok) return pre;
 
@@ -170,13 +170,13 @@ export function evaluateDisagg<TBackend extends CostBackend>(
   // Only the uncached tail moves. Measuring it as the KV of a tail-length
   // sequence keeps windowed caches honest: a window full of new tokens
   // moves whole, however long the cached prefix behind it.
-  const tail = Math.round(P * (1 - h));
+  const tail = P - cached;
   const kvBytesPerRequest = kvBytesPerSeq(model, DTYPE_BYTES[model.precision.kv], tail);
   const srcBytes = kvBytesPerChip(model, input.prefill, tail);
   const dstBytes = kvBytesPerChip(model, input.decode, tail);
   const transferTime = link.latency + Math.max(srcBytes, dstBytes) / link.bandwidthPerChip;
 
-  const pCompute = pre.tokPerSecPerChip / (P * (1 - h));
+  const pCompute = pre.tokPerSecPerChip / P;
   const dCompute = decodeTokPerSecPerChip / G;
   const pLink = linkRate(input.prefill, srcBytes, link);
   const dLink = linkRate(input.decode, dstBytes, link);
