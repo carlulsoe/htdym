@@ -206,3 +206,38 @@ export function minKvHeads(m: ModelSpec): number {
   const blocks = uniqueBlocks(m);
   return blocks.length ? Math.min(...blocks.map(blockKvHeads)) : 0;
 }
+
+// Whether an even pp-way layer split (partitionIntoStages' rule) puts a
+// layer on a different stage from the earlier layer whose compressed KV
+// or indexer keys it reads (V4.1's cross-layer sharing). Such a stage
+// would read a cache it neither holds nor receives.
+export function ppSplitsSharedCache(m: ModelSpec, pp: number): boolean {
+  if (pp <= 1) return false;
+  const layers = m.blocks
+    .flatMap((g) =>
+      Array.from({ length: g.repeat }, () =>
+        g.pattern.flatMap((r) => Array(r.count).fill(r.block)),
+      ),
+    )
+    .flat() as BlockSpec[];
+  const base = Math.floor(layers.length / pp);
+  const extra = layers.length % pp;
+  const stageOf: number[] = [];
+  for (let s = 0; s < pp; s++) for (let i = 0; i < base + (s < extra ? 1 : 0); i++) stageOf.push(s);
+
+  let kvSource = -1;
+  let keySource = -1;
+  for (const [i, b] of layers.entries()) {
+    const a = b.attn;
+    if (a.kind !== 'mqa' && a.kind !== 'csa' && a.kind !== 'hca') continue;
+    if (a.compressionRate !== null) {
+      if (!a.sharedCache) kvSource = i;
+      else if (kvSource < 0 || stageOf[kvSource] !== stageOf[i]) return true;
+    }
+    if (a.indexer) {
+      if (!a.indexer.sharedCache) keySource = i;
+      else if (keySource < 0 || stageOf[keySource] !== stageOf[i]) return true;
+    }
+  }
+  return false;
+}

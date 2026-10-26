@@ -160,7 +160,19 @@ export function evaluateServingStep<TBackend extends CostBackend>(
         tokensPerGroup: batchedTokensPerGroup,
         seqsPerGroup,
         ctx,
-        chunk: promptSeqs > 0 ? { seqs: promptSeqs, ctx: P, cached } : undefined,
+        chunk:
+          promptSeqs > 0
+            ? {
+                seqs: promptSeqs,
+                ctx: P,
+                cached,
+                // the budget the decode queries leave is what a prompt gets
+                chunkLen:
+                  serving.maxBatchedTokens === undefined
+                    ? undefined
+                    : Math.max(1, serving.maxBatchedTokens - decodeTokensPerGroup),
+              }
+            : undefined,
         includeBoundary: pp > 1 && stage.index < stages.length - 1,
         routingSkew: workload.routingSkew,
       },

@@ -6,6 +6,7 @@ import {
   minKvHeads,
   minQueryHeads,
   moeExperts,
+  ppSplitsSharedCache,
 } from '../../model/utils';
 
 import { ChipSpec } from '../../hardware/chips';
@@ -87,7 +88,8 @@ export type DiagnosticCode =
   | 'kv-no-room'
   | 'token-budget'
   | 'spec-with-pp'
-  | 'spec-draft-mismatch';
+  | 'spec-draft-mismatch'
+  | 'pp-splits-shared-cache';
 
 export interface Diagnostic {
   severity: 'error' | 'warning' | 'info';
@@ -166,6 +168,12 @@ export function validateSizes(
     diag('error', 'tp-exceeds-heads', `TP = ${tp} exceeds N = ${nHeads} query heads`);
   if (pp > layerCount(m))
     diag('error', 'pp-exceeds-layers', `PP = ${pp} exceeds L = ${layerCount(m)} layers`);
+  else if (ppSplitsSharedCache(m, pp))
+    diag(
+      'error',
+      'pp-splits-shared-cache',
+      `PP = ${pp} puts layers on a different stage from the compressed cache they share`,
+    );
 
   if (ep > 1) {
     const experts = moeExperts(m);

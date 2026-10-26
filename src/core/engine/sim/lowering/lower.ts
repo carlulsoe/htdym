@@ -32,7 +32,9 @@ export interface LowerArgs {
   // a prompt of length `ctx` whose first `cached` tokens are prefix-cache
   // hits and cost nothing. Its tokens are already counted in
   // tokensTotal / tokensPerGroup; this adds only their attention.
-  chunk?: { seqs: number; ctx: number; cached: number };
+  // `chunkLen` is how many prompt tokens one step takes from a prompt; a
+  // longer uncached part spans steps, each re-reading what came before.
+  chunk?: { seqs: number; ctx: number; cached: number; chunkLen?: number };
   // prefill: the first `cached` tokens of each prompt are prefix-cache hits
   cached?: number;
   // emit the stage-boundary send (PP > 1 and not the last stage)
@@ -79,7 +81,7 @@ export function lowerStage(args: LowerArgs, stage: Stage): Segment<LoweredOp>[] 
       // and stores its own entry, but a sequence's cache is read once.
       const kvB = DTYPE_BYTES[precision.kv];
       const tail = block.prefillTail;
-      const prompt = (seqs: number, P: number, cached: number) => {
+      const prompt = (seqs: number, P: number, cached: number, chunkLen = P - cached) => {
         const lo = tail === undefined ? cached : Math.max(cached, P - tail);
         const none = { core: 0, indexer: 0 };
         const full = blockAttnFlopsPrefillParts(block, P);
@@ -87,10 +89,17 @@ export function lowerStage(args: LowerArgs, stage: Stage): Segment<LoweredOp>[] 
         // the cache gains exactly what a (P - lo)-token sequence stores:
         // its compressed entries and as much window as it fills
         const written = blockKvBytesParts(block, kvB, P - lo, 'store');
-        // The uncached queries attend over the hit prefix, which comes from
-        // HBM: read once per prompt, as a decode step reads a sequence's
-        // cache once for all its queries (sparse picks taken as one set).
-        const prefix = cached > 0 ? blockKvBytesParts(block, kvB, cached, 'read') : none;
+        // Each chunk's queries attend over everything before it, which
+        // comes from HBM: the hit prefix, then what earlier chunks wrote.
+        // A chunk reads it once, as a decode step reads a sequence's cache
+        // once for all its queries (sparse picks taken as one set). A tail
+        // block runs only in the prompt's last chunk.
+        const starts: number[] = [];
+        for (let at = cached; at < P; at += Math.max(1, chunkLen)) starts.push(at);
+        const prefix = (tail === undefined ? starts : starts.slice(-1))
+          .filter((at) => at > 0)
+          .map((at) => blockKvBytesParts(block, kvB, at, 'read'))
+          .reduce((a, r) => ({ core: a.core + r.core, indexer: a.indexer + r.indexer }), none);
         return {
           rows: seqs * (P - lo),
           flops: {
@@ -113,7 +122,7 @@ export function lowerStage(args: LowerArgs, stage: Stage): Segment<LoweredOp>[] 
         [flops, kvWrite, kvRead] = [w.flops, w.write, w.read];
       } else {
         const chunk = args.chunk
-          ? prompt(args.chunk.seqs, args.chunk.ctx, args.chunk.cached)
+          ? prompt(args.chunk.seqs, args.chunk.ctx, args.chunk.cached, args.chunk.chunkLen)
           : null;
         const chunkTokens = args.chunk ? args.chunk.seqs * (args.chunk.ctx - args.chunk.cached) : 0;
         const decodeTokens = tokensPerGroup - chunkTokens;

@@ -180,3 +180,45 @@ test('plain decode through the serving step matches evaluateDecodeAtBatch', () =
   expect(b.stepTime).toBeCloseTo(a.stepTime);
   expect(b.outputTokPerSecPerChip).toBeCloseTo(a.tokPerSecPerChip);
 });
+
+test('a prompt longer than the step budget re-reads its earlier chunks', () => {
+  const reads = (maxBatchedTokens?: number) => {
+    const r = evaluateServingStep(
+      input(v41, 32768, 1024),
+      256,
+      { mixedPrefill: true, maxBatchedTokens },
+      opts,
+    );
+    if (!r.ok) throw new Error(r.diags.map((d) => d.message).join('; '));
+    return r.perStageTrace
+      .flat()
+      .flatMap((s) => s.ops.map((o) => (o.kind === 'attention' ? s.repeat * o.kvReadBytes : 0)))
+      .reduce((a, b) => a + b, 0);
+  };
+  expect(reads(8192)).toBeGreaterThan(reads());
+});
+
+test('pipeline splits that separate a shared cache from its readers are rejected', () => {
+  const r = evaluateServingStep(
+    {
+      model: v41,
+      deployment: {
+        chip: b300,
+        mesh: enumeratePlacements(deployedAxes(b300.interconnect, { domain: 8, nodes: 1 }), {
+          PP: 4,
+          TP: 1,
+          DPA: 2,
+          EP: 2,
+          ETP: 1,
+        })[0],
+        moeDispatch: 'coalesced-a2a',
+      },
+      workload: { prefillLen: 1024, generateLen: 1024 },
+    },
+    64,
+    {},
+    opts,
+  );
+  expect(r.ok).toBe(false);
+  if (!r.ok) expect(r.diags.map((d) => d.code)).toContain('pp-splits-shared-cache');
+});
