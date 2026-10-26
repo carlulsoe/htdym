@@ -79,6 +79,7 @@ export type DiagnosticCode =
   | 'dcp-not-divisor'
   | 'dcp-unplaceable'
   | 'dcp-without-benefit'
+  | 'routing-skew-invalid'
   | 'dtype-widened'
   | 'weights-unpacked'
   | 'weights-kernel-missing'
