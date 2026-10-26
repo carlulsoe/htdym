@@ -130,3 +130,23 @@ test('a decode layout that replicates KV heads makes the source send each copy',
   const back = run({ model: narrow, prefill: pool(4, { TP: 4, DPA: 1 }) });
   expect(back.prefill.transferBytesPerChip).toBeCloseTo(back.kvBytesPerRequest / 4);
 });
+
+test('a hit rate that rounds to the whole prompt never yields NaN', () => {
+  const e = evaluateDisagg(
+    {
+      model: llama8,
+      prefill: pool(1, { TP: 1, DPA: 1 }),
+      decode: pool(1, { TP: 1, DPA: 1 }),
+      workload: { prefillLen: 1024, generateLen: 256 },
+      decodeBatch: 32,
+      prefixHitRate: 0.99999,
+    },
+    opts,
+  );
+  // a one-token tail packs more prompts than fit: rejected, never NaN
+  if (e.ok) expect(Number.isFinite(e.usdPerMOutput)).toBe(true);
+  else expect(e.diags.map((d) => d.code)).toContain('kv-no-room');
+  const fits = run({ prefixHitRate: 0.99999, prefillSeqs: 8 });
+  expect(Number.isFinite(fits.usdPerMOutput)).toBe(true);
+  expect(fits.kvBytesPerRequest).toBeGreaterThan(0);
+});

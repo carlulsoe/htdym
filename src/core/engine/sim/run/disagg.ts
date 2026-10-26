@@ -141,7 +141,8 @@ export function evaluateDisagg<TBackend extends CostBackend>(
 
   // Prefill computes only each prompt's uncached tail, which attends over
   // the cached prefix (read from HBM). The token budget fills with tails.
-  const cached = Math.round(P * h);
+  // at least one token is always computed, however close h is to 1
+  const cached = Math.min(Math.round(P * h), P - 1);
   const pDpa = roleSize(input.prefill.mesh, 'DPA');
   const pPp = roleSize(input.prefill.mesh, 'PP');
   const seqs = input.prefillSeqs ?? pDpa * pPp * Math.max(1, Math.floor(8192 / (P - cached)));
