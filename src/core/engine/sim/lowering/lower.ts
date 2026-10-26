@@ -6,6 +6,8 @@ import {
   blockAttnParams,
   blockKvBytesParts,
   blockKvHeads,
+  type AttnFlopParts,
+  type KvByteParts,
 } from '../../../model/block';
 import { dcpAxes, dcpSize, kvFraction, Deployment, roleSize } from '../../surface/deploy';
 import { LoweredOp, Segment } from '../ir/ops';
@@ -25,6 +27,12 @@ export interface LowerArgs {
   seqsPerGroup: number;
   // decode: mean context, prefill: prompt length T
   ctx: number;
+  // A decode step can carry chunked prefill work for other sequences
+  // (continuous batching): `seqs` prompt-equivalents per batch group, each
+  // a prompt of length `ctx` whose first `cached` tokens are prefix-cache
+  // hits and cost nothing. Its tokens are already counted in
+  // tokensTotal / tokensPerGroup; this adds only their attention.
+  chunk?: { seqs: number; ctx: number; cached: number };
   // emit the stage-boundary send (PP > 1 and not the last stage)
   includeBoundary: boolean;
 }
@@ -44,7 +52,7 @@ export function lowerStage(args: LowerArgs, stage: Stage): Segment<LoweredOp>[] 
   const trace = new TraceBuilder();
 
   let residual = trace.source([tokensTotal, d_model], [roles['DPA'], []], precision.residual); // [B_dpa, D]
-  const residualT = residual.type;
+  let residualT = residual.type;
 
   for (const group of stage.groups)
     for (const { block, count } of group.pattern) {
@@ -55,6 +63,95 @@ export function lowerStage(args: LowerArgs, stage: Stage): Segment<LoweredOp>[] 
       trace.startSegment(`${attnLabel}+${mlp.kind}`, group.repeat * count);
 
       residual = trace.expect(residual, residualT); // [B_dpa, D]
+
+      // ---------------------------- Rows ----------------------------
+
+      // The attention work of this block for one batch group, and the rows
+      // its matmuls carry. Prompt work covers positions [lo, P) of each
+      // prompt: lo skips prefix-cache hits, and a block with a prefill
+      // tail skips all but the prompt's last few tokens. A decode step's
+      // tokens are its sequences' query tokens: one each, or the k+1 a
+      // speculative verify scores. Every query does its own dot products
+      // and stores its own entry, but a sequence's cache is read once.
+      const kvB = DTYPE_BYTES[precision.kv];
+      const tail = block.prefillTail;
+      const prompt = (seqs: number, P: number, cached: number) => {
+        const lo = tail === undefined ? cached : Math.max(cached, P - tail);
+        const none = { core: 0, indexer: 0 };
+        const full = blockAttnFlopsPrefillParts(block, P);
+        const hit = lo > 0 ? blockAttnFlopsPrefillParts(block, lo) : none;
+        const fullKv = blockKvBytesParts(block, kvB, P, 'store');
+        const hitKv = lo > 0 ? blockKvBytesParts(block, kvB, lo, 'store') : none;
+        return {
+          rows: seqs * (P - lo),
+          flops: {
+            core: seqs * (full.core - hit.core),
+            indexer: seqs * (full.indexer - hit.indexer),
+          },
+          write: {
+            core: seqs * (fullKv.core - hitKv.core),
+            indexer: seqs * (fullKv.indexer - hitKv.indexer),
+          },
+        };
+      };
+      let rowsPerGroup: number;
+      let flops: AttnFlopParts;
+      let kvRead: KvByteParts = { core: 0, indexer: 0 };
+      let kvWrite: KvByteParts;
+      if (args.phase === 'prefill') {
+        // TTFT runs one prompt on one group, so rows are prompt tokens
+        // times however many prompts the group holds
+        const w = prompt(seqsPerGroup, args.ctx, 0);
+        rowsPerGroup = (tokensPerGroup * w.rows) / (seqsPerGroup * args.ctx);
+        [flops, kvWrite] = [w.flops, w.write];
+      } else {
+        const chunk = args.chunk
+          ? prompt(args.chunk.seqs, args.chunk.ctx, args.chunk.cached)
+          : null;
+        const chunkTokens = args.chunk ? args.chunk.seqs * (args.chunk.ctx - args.chunk.cached) : 0;
+        const decodeTokens = tokensPerGroup - chunkTokens;
+        const per = blockAttnFlopsDecodeParts(block, args.ctx);
+        const read = blockKvBytesParts(block, kvB, args.ctx, 'read');
+        const write = blockKvBytesParts(block, kvB, 1, 'store');
+        rowsPerGroup = decodeTokens + (chunk?.rows ?? 0);
+        flops = {
+          core: decodeTokens * per.core + (chunk?.flops.core ?? 0),
+          indexer: decodeTokens * per.indexer + (chunk?.flops.indexer ?? 0),
+        };
+        kvRead = { core: seqsPerGroup * read.core, indexer: seqsPerGroup * read.indexer };
+        kvWrite = {
+          core: decodeTokens * write.core + (chunk?.write.core ?? 0),
+          indexer: decodeTokens * write.indexer + (chunk?.write.indexer ?? 0),
+        };
+      }
+      const rowsTotal = (tokensTotal * rowsPerGroup) / tokensPerGroup;
+      if (rowsTotal !== residual.type.shape[0]) {
+        // dropping (or restoring) rows moves no data
+        residual = trace.reshape(residual, [rowsTotal, d_model]);
+        residualT = residual.type;
+      }
+
+      // ---------------------------- Engram --------------------------
+
+      if (block.engram) {
+        const e = block.engram;
+        // Each token's hashed rows come over the host link, its heads split
+        // over the TP ranks (gathering them back under TP is not priced).
+        const looked = trace.hostRead(
+          'engram-rows',
+          [rowsTotal, e.projIn],
+          [roles['DPA'], []],
+          (rowsPerGroup * e.lookups * e.rowBytes) / tp,
+          acts.attention,
+        ); // [B_dpa, In]
+        const wEngram = trace.weight('engram-proj-weight', {
+          shape: [e.projIn, e.projOut],
+          sharding: [[], roles['TP']],
+          dtype: precision.weights.attention,
+        }); // [In, Out_tp]
+        // the gate against the residual is elementwise and not priced
+        trace.gemm('engram-proj', looked, wEngram, acts.attention); // [B_dpa, In] * [In, Out_tp]
+      }
 
       // --------------------------- Attention ------------------------
 
@@ -70,26 +167,9 @@ export function lowerStage(args: LowerArgs, stage: Stage): Segment<LoweredOp>[] 
 
       // TODO: comms in sharded attention? should we model attn manually?
       const kvHeadFrac = kvFraction(blockKvHeads(block), tp, dcp);
-      const flops =
-        args.phase === 'decode'
-          ? blockAttnFlopsDecodeParts(block, args.ctx)
-          : blockAttnFlopsPrefillParts(block, args.ctx);
-      const kvRead =
-        args.phase === 'decode'
-          ? blockKvBytesParts(block, DTYPE_BYTES[precision.kv], args.ctx, 'read')
-          : { core: 0, indexer: 0 };
-      const kvWrite = blockKvBytesParts(
-        block,
-        DTYPE_BYTES[precision.kv],
-        args.phase === 'decode' ? 1 : args.ctx,
-        'store',
-      );
-      const scaledFlops = (work: number) =>
-        args.phase === 'decode' ? (tokensPerGroup * work) / tp : (seqsPerGroup * work) / tp;
-      const readBytes = (bytes: number) =>
-        args.phase === 'decode' ? tokensPerGroup * kvHeadFrac * bytes : 0;
-      const writeBytes = (bytes: number) =>
-        (args.phase === 'decode' ? tokensPerGroup : seqsPerGroup) * kvHeadFrac * bytes;
+      const scaledFlops = (work: number) => work / tp;
+      const readBytes = (bytes: number) => kvHeadFrac * bytes;
+      const writeBytes = (bytes: number) => kvHeadFrac * bytes;
 
       // CSA/DSA index selection is a separate dot product and can run at a
       // narrower width than core attention. It preserves the projected
@@ -169,7 +249,7 @@ export function lowerStage(args: LowerArgs, stage: Stage): Segment<LoweredOp>[] 
       residual = lowerMoe(trace, attnOut, {
         deployment: args.deployment,
         mlp,
-        tokensTotal,
+        tokensTotal: rowsTotal,
         weights: precision.weights,
         acts,
         residual: precision.residual,

@@ -83,7 +83,9 @@ export type DiagnosticCode =
   | 'weights-unpacked'
   | 'weights-kernel-missing'
   | 'weights-dont-fit'
-  | 'kv-no-room';
+  | 'kv-no-room'
+  | 'token-budget'
+  | 'spec-with-pp';
 
 export interface Diagnostic {
   severity: 'error' | 'warning' | 'info';

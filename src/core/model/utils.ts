@@ -3,6 +3,7 @@ import {
   blockAttnFlopsDecodeParts,
   blockAttnFlopsPrefillParts,
   blockAttnParams,
+  blockEngramParams,
   blockDenseMlpParams,
   blockKvBytes,
   blockKvHeads,
@@ -44,7 +45,8 @@ export function weightBytesTotal(m: ModelSpec): number {
       (blockDenseMlpParams(m, b) + blockLatentProjParams(m, b)) * B(w.denseMlp) +
       blockSharedExpertParams(m, b) * B(w.sharedExperts) +
       blockRoutedExpertParams(m, b).total * B(w.routedExperts) +
-      blockRouterParams(m, b) * B(w.router),
+      blockRouterParams(m, b) * B(w.router) +
+      blockEngramParams(b) * B(w.attention),
   );
   const embeddingCopies = m.tiedEmbeddings ? 1 : 2;
   return blockBytes + embeddingCopies * m.vocab * m.modelDim * B(w.embeddings);
