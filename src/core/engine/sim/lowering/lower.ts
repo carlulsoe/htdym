@@ -27,6 +27,8 @@ export interface LowerArgs {
   ctx: number;
   // emit the stage-boundary send (PP > 1 and not the last stage)
   includeBoundary: boolean;
+  // MoE hottest/mean EP-rank load at large batch (SimInput's workload)
+  routingSkew?: number;
 }
 
 export function lowerStage(args: LowerArgs, stage: Stage): Segment<LoweredOp>[] {
@@ -173,6 +175,7 @@ export function lowerStage(args: LowerArgs, stage: Stage): Segment<LoweredOp>[] 
         weights: precision.weights,
         acts,
         residual: precision.residual,
+        routingSkew: args.routingSkew,
       });
 
       residual = trace.expect(residual, residualT); // [B_dpa, D]

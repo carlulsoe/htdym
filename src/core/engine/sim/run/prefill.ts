@@ -54,6 +54,7 @@ export function evaluatePrefill<TBackend extends CostBackend>(
         seqsPerGroup: mode === 'ttft' ? seqs : seqs / dpa,
         ctx: T,
         includeBoundary: pp > 1 && stage.index < stages.length - 1,
+        routingSkew: workload.routingSkew,
       },
       stage,
     ),

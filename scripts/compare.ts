@@ -13,11 +13,16 @@ import { MODEL_PRESETS } from '../src/core/model/models';
 
 // Cross-chip comparison for one model and workload on 8-GPU nodes.
 //   npm exec vite-node scripts/compare.ts -- "<model prefix>" [prefillLen] [generateLen] [slo tok/s/user]
+// ROUTING_SKEW=<hottest/mean EP-rank load> sets the MoE routing skew (default 1).
 const [modelArg = 'DeepSeek V4.1 Flash', pArg = '1024', gArg = '1024', sloArg] =
   process.argv.slice(2);
 const model = MODEL_PRESETS.find((m) => m.name.startsWith(modelArg));
 if (!model) throw new Error(`unknown model ${modelArg}`);
-const workload = { prefillLen: Number(pArg), generateLen: Number(gArg) };
+const workload = {
+  prefillLen: Number(pArg),
+  generateLen: Number(gArg),
+  routingSkew: Number(process.env.ROUTING_SKEW ?? 1),
+};
 const opts = { costBackend: makeNaiveOpCostSumBackend({ memoryOverlap: 0.9, commsOverlap: 0.65 }) };
 const slo = sloArg ? Number(sloArg) : undefined;
 
@@ -26,8 +31,12 @@ const fmtMesh = (mesh: Parameters<typeof roleSize>[0]) =>
     .map((r) => `${r}${roleSize(mesh, r)}`)
     .join(' ') || 'single';
 
-console.log(`${model.name}  ${workload.prefillLen}->${workload.generateLen}  slo=${slo ?? 'none'}`);
-console.log('chip          nodes  best layout                 dispatch        batch  tok/s/chip  $/1M out   tok/s/user');
+console.log(
+  `${model.name}  ${workload.prefillLen}->${workload.generateLen}  slo=${slo ?? 'none'}  skew=${workload.routingSkew}`,
+);
+console.log(
+  'chip          nodes  best layout                 dispatch        batch  tok/s/chip  $/1M out   tok/s/user',
+);
 for (const [chipId, nodes] of [
   ['b300', 1],
   ['b200', 1],
@@ -39,13 +48,10 @@ for (const [chipId, nodes] of [
 ] as const) {
   const chip = CHIPS_BY_ID[chipId];
   let best: { score: number; line: string } | undefined;
-  for (const step of searchShardings(
-    model,
-    chip,
-    { domain: 8, nodes },
-    workload,
-    { ...opts, phase: { kind: 'decode', policy: { sloTokPerSecPerUser: slo } } },
-  )) {
+  for (const step of searchShardings(model, chip, { domain: 8, nodes }, workload, {
+    ...opts,
+    phase: { kind: 'decode', policy: { sloTokPerSecPerUser: slo } },
+  })) {
     const c = step.candidate;
     if (!c || (best && c.score <= best.score)) continue;
     const r = c.result as Extract<typeof c.result, { tpot: number }>;
@@ -68,7 +74,12 @@ const sizes = { PP: 1, TP: 1, DPA: 8, EP: 8, ETP: 1 };
 const mesh = enumeratePlacements(axes, sizes)[0];
 for (const moeDispatch of ['coalesced-a2a', 'ring-of-experts'] as const) {
   const input = { model, deployment: { chip, mesh, moeDispatch }, workload };
-  const mem = memoryFootprint(model, input.deployment, partitionIntoStages(model, 1), workload.prefillLen + workload.generateLen);
+  const mem = memoryFootprint(
+    model,
+    input.deployment,
+    partitionIntoStages(model, 1),
+    workload.prefillLen + workload.generateLen,
+  );
   console.log(
     `\nB300 DEP8 ${moeDispatch}: weights ${(mem.weightBytesPerChip / 1e9).toFixed(1)} GB/chip, ` +
       `KV ${(mem.kvBytesPerSeqPerChip / 1e6).toFixed(2)} MB/seq, ${mem.maxResidentSeqsPerChip} seqs/chip fit`,
@@ -87,5 +98,8 @@ for (const moeDispatch of ['coalesced-a2a', 'ring-of-experts'] as const) {
     );
   }
   const p = evaluatePrefill(input, 8, 'throughput', opts);
-  if (p.ok) console.log(`  prefill 8 seqs x ${workload.prefillLen}: ${p.tokPerSecPerChip.toFixed(0)} tok/s/chip`);
+  if (p.ok)
+    console.log(
+      `  prefill 8 seqs x ${workload.prefillLen}: ${p.tokPerSecPerChip.toFixed(0)} tok/s/chip`,
+    );
 }
